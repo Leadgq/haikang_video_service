@@ -116,8 +116,33 @@ function publicSession(session) {
   }
 }
 
-function resetDir(dir) {
-  fs.rmSync(dir, { recursive: true, force: true })
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function removeDirNow(dir) {
+  if (!dir || !fs.existsSync(dir)) return
+  fs.rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 200 })
+}
+
+async function removeDir(dir) {
+  if (!dir) return
+  for (let i = 0; i < 8; i++) {
+    try {
+      removeDirNow(dir)
+      return
+    } catch (error) {
+      if (i === 7) {
+        console.warn(`[cleanup] 删除失败 ${dir}: ${error.message}`)
+        return
+      }
+      await sleep(300)
+    }
+  }
+}
+
+async function resetDir(dir) {
+  await removeDir(dir)
   fs.mkdirSync(dir, { recursive: true })
 }
 
@@ -171,9 +196,27 @@ function stopFfmpeg(session) {
 async function destroySession(id) {
   const session = sessions.get(id)
   if (!session) return
-  await stopFfmpeg(session)
   sessions.delete(id)
-  fs.rmSync(session.dir, { recursive: true, force: true })
+  await stopFfmpeg(session)
+  await sleep(200)
+  await removeDir(session.dir)
+  console.log(`[stop] removed ${session.id.slice(0, 8)} ${session.dir}`)
+}
+
+async function cleanupOrphans() {
+  const legacyHls = path.join(ROOT, 'work', 'hls')
+  await removeDir(legacyHls)
+  if (!fs.existsSync(SESSIONS_DIR)) return
+  const live = new Set([...sessions.values()].map((item) => item.dir))
+  for (const name of fs.readdirSync(SESSIONS_DIR)) {
+    const dir = path.join(SESSIONS_DIR, name)
+    if (!live.has(dir)) await removeDir(dir)
+  }
+}
+
+async function destroyAll() {
+  await Promise.all([...sessions.keys()].map((id) => destroySession(id)))
+  await cleanupOrphans()
 }
 
 function waitForPlaylist(session, timeoutMs = 120000) {
@@ -212,7 +255,7 @@ async function startTranscode(session, ss = 0) {
     return
   }
 
-  resetDir(session.dir)
+  await resetDir(session.dir)
   session.status = 'transcoding'
   session.error = ''
   session.time = ''
@@ -308,10 +351,10 @@ function touch(session) {
 
 setInterval(() => {
   const now = Date.now()
-  for (const session of sessions.values()) {
+  for (const session of [...sessions.values()]) {
     if (now - session.lastAccess > IDLE_MS) {
       console.log(`[idle] drop ${session.id.slice(0, 8)}`)
-      destroySession(session.id)
+      destroySession(session.id).then(() => cleanupOrphans())
     }
   }
 }, 15000)
@@ -444,6 +487,12 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
+  if (url.pathname === '/transcode/cleanup' && (req.method === 'POST' || req.method === 'GET')) {
+    await destroyAll()
+    sendJson(res, 200, { ok: true, removed: true })
+    return
+  }
+
   if (url.pathname === '/transcode/start' && req.method === 'POST') {
     const body = await readJson(req)
     try {
@@ -484,7 +533,8 @@ const server = http.createServer(async (req, res) => {
 
     if (rest === 'stop' && (req.method === 'POST' || req.method === 'GET')) {
       await destroySession(session.id)
-      sendJson(res, 200, { ok: true })
+      await cleanupOrphans()
+      sendJson(res, 200, { ok: true, removed: true })
       return
     }
 
@@ -521,10 +571,18 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, '0.0.0.0', async () => {
   fs.mkdirSync(SESSIONS_DIR, { recursive: true })
+  await cleanupOrphans()
   console.log(`page     http://127.0.0.1:${PORT}/`)
   console.log(`start    POST http://127.0.0.1:${PORT}/transcode/start`)
   console.log(`source   ${SOURCE}`)
   console.log(`sessions max=${MAX_SESSIONS} idle=${IDLE_MS / 1000}s`)
   sourceDuration = await probeDuration()
   console.log(`duration ${sourceDuration || 'unknown'}s`)
+})
+
+process.on('SIGINT', () => {
+  destroyAll().finally(() => process.exit(0))
+})
+process.on('SIGTERM', () => {
+  destroyAll().finally(() => process.exit(0))
 })
