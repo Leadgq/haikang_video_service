@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Runtime media and transcode output
+work/**
+!work/.gitkeep
+
+# Environment & secrets
+.env
+.env.*
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
