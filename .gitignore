@@ -4,6 +4,8 @@ node_modules/
 # Runtime media and transcode output
 work/**
 !work/.gitkeep
+work/hls/
+work/sessions/
 
 # Environment & secrets
 .env
@@ -20,3 +22,4 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
